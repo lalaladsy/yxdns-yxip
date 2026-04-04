@@ -145,7 +145,7 @@ def main():
         try:
             requests.post('http://www.pushplus.plus/send', json={
                 "token": PUSHPLUS_TOKEN,
-                "title": "CF 优选自动伸缩报告",
+                "title": "CF 优选自动解析报告",
                 "content": full_content,
                 "template": "markdown"
             })
@@ -154,7 +154,7 @@ def main():
             print("❌ [PushPlus] 发送失败")
 
     # 5.2 Telegram 推送 (额外增加)
-    send_telegram(f"🚀 *CF 自动伸缩报告*\n\n{full_content}")
+    send_telegram(f"🚀 *CF 自动解析报告*\n\n{full_content}")
 
 if __name__ == '__main__':
     main()
