@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Cloudflare DNS 更新器 - 精准 10 IP 修复版
-解决多域名下解析数量不足 10 条及推送排版混乱的问题
-"""
 
-import json
-import traceback
-import time
-import os
-import requests
+import json, time, os, requests
 
 # API 配置
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
@@ -22,35 +14,33 @@ HEADERS = {
     'Content-Type': 'application/json'
 }
 
-DEFAULT_TIMEOUT = 30
-
-def get_cf_speed_test_ip(timeout=10, max_retries=5):
-    """获取优选 IP"""
-    for attempt in range(max_retries):
-        try:
-            # 确保请求 Top10 接口
-            response = requests.get('https://ip.164746.xyz/ipTop10.html', timeout=timeout)
-            if response.status_code == 200:
-                return response.text
-        except:
-            pass
-    return None
+def get_cf_speed_test_ip():
+    """获取并精准提取 10 个有效 IP"""
+    try:
+        response = requests.get('https://ip.164746.xyz/ipTop10.html', timeout=10)
+        if response.status_code == 200:
+            # 兼容逗号和换行，彻底过滤空值
+            raw_ips = response.text.replace('\n', ',').split(',')
+            ips = [ip.strip() for ip in raw_ips if ip.strip()]
+            # 强制返回前 10 个（如果够的话）
+            return ips[:10]
+    except:
+        return []
 
 def get_dns_records(name):
-    """获取 Cloudflare 后台该域名所有的 A 记录"""
-    records = []
-    # 增加 per_page=100 确保能一次性抓取到所有 10 条记录
-    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records?type=A&name={name}&per_page=100'
+    """获取该域名的所有 A 记录，确保不被分页截断"""
+    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records'
+    # 增加 per_page 确保一次性抓完
+    params = {'type': 'A', 'name': name, 'per_page': 50}
     try:
-        response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
+        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
         if response.status_code == 200:
-            records = response.json().get('result', [])
+            return response.json().get('result', [])
     except:
-        pass
-    return records
+        return []
 
 def update_dns_record(record_info, name, cf_ip):
-    """更新记录并返回结果字符串"""
+    """执行更新，并返回带 Emoji 的整齐结果"""
     record_id = record_info['id']
     current_ip = record_info.get('content', '')
 
@@ -60,72 +50,57 @@ def update_dns_record(record_info, name, cf_ip):
     url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}'
     data = {'type': 'A', 'name': name, 'content': cf_ip}
     try:
-        response = requests.put(url, headers=HEADERS, json=data, timeout=DEFAULT_TIMEOUT)
+        response = requests.put(url, headers=HEADERS, json=data, timeout=10)
         if response.status_code == 200:
-            return f"🚀 `{cf_ip}` | {name} (更新成功)"
+            return f"🚀 `{cf_ip}` | {name} (成功)"
         else:
-            return f"❌ `{cf_ip}` | {name} (失败)"
+            return f"❌ `{cf_ip}` | {name} (失败:{response.status_code})"
     except:
         return f"⚠️ `{cf_ip}` | {name} (异常)"
 
 def push_plus(content):
     if not PUSHPLUS_TOKEN: return
     url = 'http://www.pushplus.plus/send'
-    # 使用 Markdown 模板确保换行生效
     data = {
         "token": PUSHPLUS_TOKEN, 
-        "title": "CF优选 10-IP 推送", 
+        "title": "CF优选 10-IP 报告", 
         "content": content, 
         "template": "markdown"
     }
-    try:
-        requests.post(url, json=data, timeout=DEFAULT_TIMEOUT)
-    except:
-        pass
+    try: requests.post(url, json=data, timeout=10)
+    except: pass
 
 def main():
-    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]):
-        print("错误: 缺少必要的环境变量")
-        return
+    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]): return
 
-    # 1. 获取并清洗 IP 列表
-    ip_data = get_cf_speed_test_ip()
-    if not ip_data:
-        print("错误: 无法获取 IP 数据")
-        return
-    
-    # 使用 split(',') 并通过 if ip.strip() 过滤掉末尾逗号产生的空元素
-    # 这样能确保得到的 ip_list 长度正好是 10
-    ip_list = [ip.strip() for ip in ip_data.split(',') if ip.strip()]
-    print(f"成功获取到 {len(ip_list)} 个优选 IP")
+    # 1. 拿到 10 个 IP
+    ip_list = get_cf_speed_test_ip()
+    if not ip_list: return
 
-    # 2. 拆分多个域名变量
+    # 2. 拿到域名列表
     target_domains = [d.strip() for d in CF_DNS_NAME.split(',') if d.strip()]
-    
-    all_push_results = []
+    all_results = []
 
-    # 3. 循环处理域名
     for domain in target_domains:
+        # 3. 拿到该域名在 CF 的所有坑位
         dns_records = get_dns_records(domain)
-        record_count = len(dns_records)
-        print(f"域名 {domain} 在后台共有 {record_count} 条 A 记录")
+        
+        # 调试信息：会在 Actions 日志里显示
+        print(f"域名 {domain} 识别到 {len(dns_records)} 条记录，准备匹配 {len(ip_list)} 个 IP")
 
-        if record_count == 0:
-            all_push_results.append(f"❌ 域名 `{domain}` 在 CF 后台没有 A 记录")
-            continue
+        # 4. 使用 zip 严格对齐 IP 和 记录
+        # 只要 dns_records 是 10 个，ip_list 是 10 个，这里就会精准跑 10 次
+        for record, ip in zip(dns_records, ip_list):
+            res = update_dns_record(record, domain, ip)
+            all_results.append(res)
+            # 稍微停顿，避免请求过快
+            time.sleep(0.5)
 
-        # 核心逻辑：确保更新数量与后台记录数量一致
-        # 如果后台有 10 条，我们就用 ip_list 的前 10 个
-        for i in range(min(len(ip_list), record_count)):
-            res = update_dns_record(dns_records[i], domain, ip_list[i])
-            all_push_results.append(res)
-
-    # 4. 汇总推送，使用 \n\n 实现强制换行
-    if all_push_results:
-        # 每条记录占一行，显示更加美观
-        formatted_message = "#### 更新详情：\n\n" + '\n\n'.join(all_push_results)
-        push_plus(formatted_message)
+    # 5. 汇总推送，强制换行
+    if all_results:
+        # 每一个条目占一行
+        final_msg = "#### 更新详情 (每域名 10 条)：\n\n" + '\n\n'.join(all_results)
+        push_plus(final_msg)
 
 if __name__ == '__main__':
     main()
-
