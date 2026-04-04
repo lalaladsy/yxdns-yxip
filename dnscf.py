@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import json, time, os, requests, re, subprocess, platform
-from concurrent.futures import ThreadPoolExecutor
+import json, time, os, requests, re
 
-# --- 权限配置 ---
+# --- 权限配置 (仅保留敏感密钥在 Secrets) ---
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_ZONE_ID = os.environ.get("CF_ZONE_ID")
 CF_DNS_NAME = os.environ.get("CF_DNS_NAME")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
-# --- 优选策略配置 ---
-MAX_FINAL_IPS = 15     # 最终解析的最优 IP 数量
-PING_THREADS = 30      # 测速并发线程数
+# --- 硬编码接口列表 ---
 SOURCE_URLS = [
     "https://vps789.com/openApi/cfIpApi",
     "https://cf.001315.xyz/cu",
@@ -23,53 +20,33 @@ SOURCE_URLS = [
 
 HEADERS = {'Authorization': f'Bearer {CF_API_TOKEN}', 'Content-Type': 'application/json'}
 
-def get_ping_latency(ip):
-    """底层测速引擎"""
-    param = '-n' if platform.system().lower() == 'windows' else '-c'
-    cmd = ['ping', param, '1', '-W', '1', ip]
-    try:
-        start = time.time()
-        subprocess.check_call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return ip, int((time.time() - start) * 1000)
-    except:
-        return ip, 9999
-
-def get_ips_and_rank():
+def get_ips_audit():
+    """硬核抓取：多接口正则提取 + 智能去重"""
     source_stats, all_raw_ips = {}, []
     
-    # 1. 抓取
     for url in SOURCE_URLS:
-        name = url.split('/')[-1] if len(url.split('/')[-1]) > 5 else url.split('/')[-2]
+        name = url.split('/')[-1] if len(url.split('/')[-1]) > 2 else url.split('/')[-2]
         try:
+            # 增加随机 Header 模拟浏览器，防止被某些接口拦截
             res = requests.get(url, timeout=12, headers={'User-Agent': 'Mozilla/5.0'})
             if res.status_code == 200:
-                found = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', res.text)
-                ips = [ip for ip in found if all(0 <= int(p) <= 255 for p in ip.split('.'))]
+                # 强力正则：只抓 IPv4，过滤掉 HTML 标签和杂质
+                ips = [ip for ip in re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', res.text) 
+                       if all(0 <= int(p) <= 255 for p in ip.split('.'))]
                 source_stats[name] = len(ips)
                 all_raw_ips.extend(ips)
-        except: source_stats[name] = "获取失败"
+            else:
+                source_stats[name] = f"Error:{res.status_code}"
+        except:
+            source_stats[name] = "Timeout/Fail"
 
-    # 2. 去重
+    # 顺序去重
     unique_ips = list(dict.fromkeys(all_raw_ips))
-    
-    # 3. 高并发测速
-    print(f"📡 启动测速：针对 {len(unique_ips)} 个独立 IP...")
-    with ThreadPoolExecutor(max_workers=PING_THREADS) as executor:
-        results = list(executor.map(get_ping_latency, unique_ips))
-    
-    # 4. 筛选最优
-    valid_results = sorted([r for r in results if r[1] < 9999], key=lambda x: x[1])
-    final_results = valid_results[:MAX_FINAL_IPS]
-    
-    # 5. 格式化最优 IP 列表用于通知
-    top_ips_display = "、".join([f"`{r[0]}({r[1]}ms)`" for r in final_results[:5]])
-    
-    return [x[0] for x in final_results], {
+    return unique_ips, {
         "sources": source_stats,
         "raw": len(all_raw_ips),
         "dup": len(all_raw_ips) - len(unique_ips),
-        "valid": len(valid_results),
-        "top_ips": top_ips_display
+        "final": len(unique_ips)
     }
 
 def cf_api(method, endpoint, data=None):
@@ -80,25 +57,27 @@ def cf_api(method, endpoint, data=None):
         if res.status_code == 200 and res_j.get('success'):
             return True, "OK", res_j
         else:
-            msg = res_j.get('errors', [{}])[0].get('message', 'CF接口异常')
+            msg = res_j.get('errors', [{}])[0].get('message', 'Cloudflare API 异常')
             return False, msg, None
-    except: return False, "网络异常", None
+    except Exception as e:
+        return False, str(e), None
 
 def main():
-    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]): return
+    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]):
+        print("❌ 缺少关键配置，请检查 GitHub Secrets")
+        return
 
-    # 1. 测速与优选
-    ips, audit = get_ips_and_rank()
-    if not ips: return
+    # 1. 审计与去重
+    ips, audit = get_ips_audit()
+    if not ips:
+        print("⚠️ 未抓取到任何 IP，脚本终止")
+        return
 
-    # 2. 构造推送报告 (回归你要求的列表格式)
-    report = [f"### 📊 节点优选审计报告 (入选: {len(ips)})"]
+    # 2. 构造推送报告
+    report = [f"### 📊 节点数据审计 (Total: {audit['final']})"]
     for src, count in audit['sources'].items():
         report.append(f"- `Source: {src}` → **{count}** IP")
-    
-    report.append(f"\n> **优选统计**: 原始 `{audit['raw']}` | 重复过滤 `{audit['dup']}` | 有效通路 `{audit['valid']}`")
-    report.append(f"> **核心优选**: {audit['top_ips']} 等")
-    report.append("\n---")
+    report.append(f"\n> 原始总计: {audit['raw']} | 重复过滤: {audit['dup']} | **最终生效: {audit['final']}**\n\n---")
 
     # 3. 域名弹性同步
     domains = [d.strip() for d in CF_DNS_NAME.replace('，', ',').split(',') if d.strip()]
@@ -113,6 +92,7 @@ def main():
         ops = {"u": 0, "a": 0, "d": 0, "e": 0}
         err_log = ""
 
+        # 核心伸缩算法
         for i in range(max(nc, oc)):
             if i < nc and i < oc:
                 if old_recs[i]['content'] != ips[i]:
@@ -129,7 +109,7 @@ def main():
                 else: ops["e"]+=1; err_log = emsg
             time.sleep(0.3)
 
-        # 4. 域名审计结果
+        # 4. 组装域名审计结果
         status = f"### 🌐 域名: {domain}\n"
         status += f"- **弹性规模**: `{oc}` ➔ `{nc}`\n"
         status += f"- **执行详情**: 更新 `{ops['u']}` | 新增 `{ops['a']}` | 删除 `{ops['d']}`"
@@ -141,7 +121,7 @@ def main():
     if PUSHPLUS_TOKEN:
         requests.post('http://www.pushplus.plus/send', json={
             "token": PUSHPLUS_TOKEN,
-            "title": "CF 优选精选同步报告",
+            "title": "CF 优选自动伸缩报告",
             "content": "\n".join(report),
             "template": "markdown"
         })
