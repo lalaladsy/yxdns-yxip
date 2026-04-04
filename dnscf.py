@@ -15,22 +15,21 @@ HEADERS = {
 }
 
 def get_cf_speed_test_ip():
-    """精准获取 10 个 IP，排除所有干扰项"""
+    """获取优选 IP，返回实际获取到的所有 IP 列表"""
     try:
         response = requests.get('https://ip.164746.xyz/ipTop10.html', timeout=10)
         if response.status_code == 200:
-            # 先统一替换换行符，再按逗号拆分，最后过滤掉空格和空值
+            # 彻底清洗数据
             raw = response.text.replace('\n', ',').split(',')
             ips = [ip.strip() for ip in raw if ip.strip()]
-            # 此时 ips 列表长度应为 10
-            return ips[:10]
+            return ips
     except:
         return []
 
 def get_dns_records(name):
-    """获取该域名的所有 A 记录（强制抓取 50 条以内，防止分页漏掉）"""
+    """获取该域名的所有 A 记录"""
     url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records'
-    params = {'type': 'A', 'name': name, 'per_page': 50}
+    params = {'type': 'A', 'name': name, 'per_page': 100}
     try:
         response = requests.get(url, headers=HEADERS, params=params, timeout=10)
         if response.status_code == 200:
@@ -38,69 +37,96 @@ def get_dns_records(name):
     except:
         return []
 
-def update_dns_record(record_info, name, cf_ip):
-    """更新逻辑：如果 IP 一样就跳过，不一样就 PUT"""
-    record_id = record_info['id']
-    current_ip = record_info.get('content', '')
-
-    if current_ip == cf_ip:
-        return f"✅ `{cf_ip}` | {name} (最新)"
-
-    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}'
-    data = {'type': 'A', 'name': name, 'content': cf_ip}
+def create_dns_record(name, ip):
+    """新增一条 A 记录"""
+    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records'
+    data = {'type': 'A', 'name': name, 'content': ip, 'ttl': 60, 'proxied': False}
     try:
-        # 失败自动重试 1 次，增加稳定性
-        for _ in range(2):
-            response = requests.put(url, headers=HEADERS, json=data, timeout=10)
-            if response.status_code == 200:
-                return f"🚀 `{cf_ip}` | {name} (成功)"
-            time.sleep(0.5)
-        return f"❌ `{cf_ip}` | {name} (失败:{response.status_code})"
+        res = requests.post(url, headers=HEADERS, json=data, timeout=10)
+        return res.status_code == 200
     except:
-        return f"⚠️ `{cf_ip}` | {name} (异常)"
+        return False
 
-def push_plus(content):
+def delete_dns_record(record_id):
+    """删除一条记录"""
+    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}'
+    try:
+        res = requests.delete(url, headers=HEADERS, timeout=10)
+        return res.status_code == 200
+    except:
+        return False
+
+def update_dns_record(record_id, name, ip):
+    """更新已有记录"""
+    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}'
+    data = {'type': 'A', 'name': name, 'content': ip, 'ttl': 60, 'proxied': False}
+    try:
+        res = requests.put(url, headers=HEADERS, json=data, timeout=10)
+        return res.status_code == 200
+    except:
+        return False
+
+def push_plus(title, content):
     if not PUSHPLUS_TOKEN: return
     url = 'http://www.pushplus.plus/send'
-    data = {
-        "token": PUSHPLUS_TOKEN, 
-        "title": "CF优选 10-IP 报告", 
-        "content": content, 
-        "template": "markdown"
-    }
+    data = {"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "markdown"}
     try: requests.post(url, json=data, timeout=10)
     except: pass
 
 def main():
     if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]): return
 
-    # 1. 拿到 10 个优选 IP
-    ip_list = get_cf_speed_test_ip()
-    if not ip_list: return
+    # 1. 获取优选 IP
+    new_ips = get_cf_speed_test_ip()
+    ip_count = len(new_ips)
+    if ip_count == 0: return
 
-    # 2. 拿到所有需要更新的域名
     target_domains = [d.strip() for d in CF_DNS_NAME.split(',') if d.strip()]
-    all_results = []
+    report = []
 
     for domain in target_domains:
-        # 3. 拿到该域名在 CF 的坑位
-        dns_records = get_dns_records(domain)
+        # 2. 获取现有记录
+        old_records = get_dns_records(domain)
+        old_count = len(old_records)
         
-        # 调试输出：可以在 Actions 日志中看到真实的坑位数量
-        print(f"--- 正在处理 {domain}，识别到 {len(dns_records)} 条 A 记录 ---")
+        actions = {"update": 0, "create": 0, "delete": 0}
+        
+        # 3. 逻辑处理
+        # 情况 A: IP 多于 现有记录 -> 更新现有 + 创建多出的
+        # 情况 B: IP 少于 现有记录 -> 更新匹配的 + 删除多余的
+        
+        max_idx = max(ip_count, old_count)
+        
+        for i in range(max_idx):
+            if i < ip_count and i < old_count:
+                # 更新
+                if old_records[i]['content'] != new_ips[i]:
+                    if update_dns_record(old_records[i]['id'], domain, new_ips[i]):
+                        actions["update"] += 1
+                else:
+                    pass # 内容一致跳过
+            elif i < ip_count:
+                # 现有坑位不够，创建新坑位
+                if create_dns_record(domain, new_ips[i]):
+                    actions["create"] += 1
+            elif i < old_count:
+                # 优选 IP 变少了，删除多余坑位
+                if delete_dns_record(old_records[i]['id']):
+                    actions["delete"] += 1
+            
+            time.sleep(0.5)
 
-        # 4. 核心对齐：zip 会以最短的列表为准。
-        # 只要 dns_records 是 10 条，ip_list 是 10 条，它就一定会跑 10 次。
-        for record, ip in zip(dns_records, ip_list):
-            res = update_dns_record(record, domain, ip)
-            all_results.append(res)
-            time.sleep(0.5) # 稍微停顿，对 API 友好一点
+        # 4. 组装单个域名的报告
+        domain_status = f"### 🌐 域名: {domain}\n"
+        domain_status += f"- **获取优选 IP**: `{ip_count}` 个\n"
+        domain_status += f"- **原有解析坑位**: `{old_count}` 个\n"
+        domain_status += f"- **执行操作**: 更新 `{actions['update']}`，新增 `{actions['create']}`，删除 `{actions['delete']}`\n"
+        domain_status += f"- **最终生效数量**: `{ip_count}` 个\n\n"
+        report.append(domain_status)
 
-    # 5. 汇总并按照你的要求“一行一个”推送
-    if all_results:
-        # 使用 \n\n 强制换行
-        final_msg = "#### 更新详情 (每域名 10 条)：\n\n" + '\n\n'.join(all_results)
-        push_plus(final_msg)
+    # 5. 发送汇总推送
+    if report:
+        push_plus("CF 优选自动伸缩报告", "".join(report))
 
 if __name__ == '__main__':
     main()
