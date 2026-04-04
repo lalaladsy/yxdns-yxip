@@ -131,7 +131,7 @@ def main():
         if audit['dup_list']:
             tg_text.append(f"\n⚠️ *重复项过滤* (`{audit['dup_count']}` 组):")
             # 严格按照你要求的原版，保留 [:8] 限制
-            for item in audit['dup_list'][:8]: 
+            for item in audit['dup_list'][:20]: 
                 tg_text.append(f" └ `{item}`")
             
         tg_text.append(f"\n📡 *解析执行状态*:")
@@ -159,7 +159,7 @@ def main():
         
         if audit['dup_list']:
             pp_text.append(f"⚠️ **发现 {audit['dup_count']} 个重复项**:")
-            for item in audit['dup_list'][:10]:
+            for item in audit['dup_list'][:20]:
                 pp_text.append(f"└ {item}")
         
         pp_text.append("\n" + "—" * 15 + "\n")
