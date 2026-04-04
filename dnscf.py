@@ -24,7 +24,6 @@ HEADERS = {'Authorization': f'Bearer {CF_API_TOKEN}', 'Content-Type': 'applicati
 
 def get_ips_audit():
     source_stats, ip_map = {}, {}
-    # 自动编号命名：接口 01, 接口 02...
     for index, url in enumerate(SOURCE_URLS, 1):
         name = f"接口 {index:02d}"
         try:
@@ -71,20 +70,19 @@ def cf_api(method, endpoint, data=None):
 
 def main():
     if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]):
-        print("❌ 核心配置缺失，请检查 Secrets")
+        print("❌ 核心配置缺失")
         return
 
     ips, audit = get_ips_audit()
     if not ips:
-        print("⚠️ 未能抓取到任何有效 IP")
+        print("⚠️ 未抓取到有效 IP")
         return
 
-    # --- 1:1 自动伸缩同步逻辑 ---
     domains = [d.strip() for d in CF_DNS_NAME.replace('，', ',').split(',') if d.strip()]
     results = []
 
     for domain in domains:
-        short_name = domain.split('.')[0] # 提取二级名称
+        short_name = domain.split('.')[0]
         success, res = cf_api("GET", f"dns_records?type=A&name={domain}&per_page=100")
         if not success: continue
             
@@ -104,10 +102,13 @@ def main():
                 ok, _ = cf_api("DELETE", f"dns_records/{old_recs[i]['id']}")
                 if ok: ops["d"]+=1
             time.sleep(0.2)
-        results.append({"name": short_name, "u": ops["u"], "a": ops["a"], "d": ops["d"]})
+        
+        # 计算当前该域名最终拥有的解析记录总数
+        current_total = oc - ops["d"] + ops["a"]
+        results.append({"name": short_name, "u": ops["u"], "a": ops["a"], "d": ops["d"], "total": current_total})
 
     # ==========================================
-    # 🚀 TELEGRAM 推送 (硬核运维版 - 中文)
+    # 🚀 TELEGRAM 推送 (运维看板 - 中文版)
     # ==========================================
     if TG_BOT_TOKEN and TG_CHAT_ID:
         tg_text = [
@@ -129,10 +130,11 @@ def main():
             for item in audit['dup_list'][:8]: 
                 tg_text.append(f" └ `{item}`")
             
-        tg_text.append(f"\n📡 *解析下发状态*:")
+        tg_text.append(f"\n📡 *解析执行状态*:")
         for r in results:
             tg_text.append(f" ├── 域名: *{r['name']}*")
-            tg_text.append(f" └── 🟢更新:`{r['u']}` | 🔵新增:`{r['a']}` | 🔴删除:`{r['d']}`")
+            # 在后面增加了“当前”统计
+            tg_text.append(f" └── 🟢更新:`{r['u']}`|🔵新增:`{r['a']}`|🔴删除:`{r['d']}`|✨当前:`{r['total']}`")
 
         tg_text.append(f"━━━━━━━━━━━━━━━━━━")
         tg_text.append(f"⏰ 执行时间: `{time.strftime('%H:%M:%S')}`")
@@ -141,7 +143,7 @@ def main():
                       json={"chat_id": TG_CHAT_ID, "text": "\n".join(tg_text), "parse_mode": "Markdown"})
 
     # ==========================================
-    # 📋 PUSHPLUS 推送 (经典表情版 - 解决挤压)
+    # 📋 PUSHPLUS 推送 (经典表情版)
     # ==========================================
     if PUSHPLUS_TOKEN:
         pp_text = [
@@ -161,9 +163,9 @@ def main():
         
         for r in results:
             pp_text.append(f"🌐 **目标域**: `{r['name']}`")
-            pp_text.append(f"✅ 更新: {r['u']} | ➕ 新增: {r['a']} | ➖ 删除: {r['d']}\n")
+            # 同样在 PushPlus 增加了当前总计展示
+            pp_text.append(f"✅ 更新: {r['u']} | ➕ 新增: {r['a']} | ➖ 删除: {r['d']} | ✨ 当前: {r['total']}\n")
 
-        # 使用 \n\n 强制分行，防止 PushPlus 文字挤压
         requests.post('http://www.pushplus.plus/send', 
                       json={"token": PUSHPLUS_TOKEN, "title": "CFIP 解析报告", 
                             "content": "\n\n".join(pp_text), "template": "markdown"})
