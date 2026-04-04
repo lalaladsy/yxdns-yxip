@@ -4,7 +4,7 @@
 import json, time, os, requests, re
 from urllib.parse import urlparse
 
-# --- 权限配置 ---
+# --- 权限配置 (请在 GitHub Secrets 中配置) ---
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_ZONE_ID = os.environ.get("CF_ZONE_ID")
 CF_DNS_NAME = os.environ.get("CF_DNS_NAME")
@@ -24,6 +24,7 @@ HEADERS = {'Authorization': f'Bearer {CF_API_TOKEN}', 'Content-Type': 'applicati
 
 def get_ips_audit():
     source_stats, ip_map = {}, {}
+    # 自动编号命名：接口 01, 接口 02...
     for index, url in enumerate(SOURCE_URLS, 1):
         name = f"接口 {index:02d}"
         try:
@@ -69,15 +70,21 @@ def cf_api(method, endpoint, data=None):
         return False, None
 
 def main():
-    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]): return
-    ips, audit = get_ips_audit()
-    if not ips: return
+    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]):
+        print("❌ 核心配置缺失，请检查 Secrets")
+        return
 
+    ips, audit = get_ips_audit()
+    if not ips:
+        print("⚠️ 未能抓取到任何有效 IP")
+        return
+
+    # --- 1:1 自动伸缩同步逻辑 ---
     domains = [d.strip() for d in CF_DNS_NAME.replace('，', ',').split(',') if d.strip()]
     results = []
 
     for domain in domains:
-        short_name = domain.split('.')[0]
+        short_name = domain.split('.')[0] # 提取二级名称
         success, res = cf_api("GET", f"dns_records?type=A&name={domain}&per_page=100")
         if not success: continue
             
@@ -100,59 +107,65 @@ def main():
         results.append({"name": short_name, "u": ops["u"], "a": ops["a"], "d": ops["d"]})
 
     # ==========================================
-    # 美化版逻辑 A：Telegram (极客风)
+    # 🚀 TELEGRAM 推送 (硬核运维版 - 中文)
     # ==========================================
     if TG_BOT_TOKEN and TG_CHAT_ID:
         tg_text = [
-            f"🚀 *CF IP-AutoSync Terminal*\n",
-            f"💎 *Audit Strategy*: `Unique:{audit['final']}`",
-            f"📈 *Data Source Status*:"
+            f"🚀 *Cloudflare 解析同步终端*",
+            f"━━━━━━━━━━━━━━━━━━",
+            f"📊 *运行数据统计*",
+            f" ├ ✅ 可用 IP: `{audit['final']}`",
+            f" └ 📥 抓取 IP: `{audit['raw']}`",
+            f"\n📁 *接口快照*:"
         ]
-        for src, count in audit['sources'].items():
-            tg_text.append(f" ├ `{src}` ❯ `{count}` IP")
+        
+        src_keys = list(audit['sources'].keys())
+        for i, src in enumerate(src_keys):
+            sym = " └──" if i == len(src_keys) - 1 else " ├──"
+            tg_text.append(f"{sym} `{src}` ❯ `{audit['sources'][src]}` IP")
         
         if audit['dup_list']:
-            tg_text.append(f"\n⚠️ *Duplication Found* (`{audit['dup_count']}`):")
+            tg_text.append(f"\n⚠️ *重复项过滤* (`{audit['dup_count']}` 组):")
             for item in audit['dup_list'][:8]: 
                 tg_text.append(f" └ `{item}`")
             
-        tg_text.append("\n" + "—" * 15)
+        tg_text.append(f"\n📡 *解析下发状态*:")
         for r in results:
-            tg_text.append(f"🌐 *DNS: {r['name']}*")
-            tg_text.append(f" `Update:{r['u']}` | `Add:{r['a']}` | `Del:{r['d']}`")
+            tg_text.append(f" ├── 域名: *{r['name']}*")
+            tg_text.append(f" └── 🟢更新:`{r['u']}` | 🔵新增:`{r['a']}` | 🔴删除:`{r['d']}`")
+
+        tg_text.append(f"━━━━━━━━━━━━━━━━━━")
+        tg_text.append(f"⏰ 执行时间: `{time.strftime('%H:%M:%S')}`")
 
         requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": TG_CHAT_ID, "text": "\n".join(tg_text), "parse_mode": "Markdown"})
 
     # ==========================================
-    # 美化版逻辑 B：PushPlus (卡片风)
+    # 📋 PUSHPLUS 推送 (经典表情版 - 解决挤压)
     # ==========================================
     if PUSHPLUS_TOKEN:
         pp_text = [
-            f"## 🛠️ CFIP 解析审计报告",
-            f"**唯一生效**: `{audit['final']}` | **原始抓取**: `{audit['raw']}`\n",
-            "---"
+            f"📊 **节点审计报告** (可用总数: {audit['final']})\n",
         ]
-        
-        # 接口统计
         for src, count in audit['sources'].items():
-            pp_text.append(f"- **{src}**：`{count}` 条记录")
+            pp_text.append(f"• `{src}` → **{count}** IP")
         
-        # 重复项采用引用块，增加视觉深度
+        pp_text.append(f"\n📥 抓取 IP: {audit['raw']} | ✅ **可用 IP: {audit['final']}**\n")
+        
         if audit['dup_list']:
-            pp_text.append(f"\n### ⚠️ 重复项详情 (Total: {audit['dup_count']})")
+            pp_text.append(f"⚠️ **发现 {audit['dup_count']} 个重复项**:")
             for item in audit['dup_list'][:10]:
-                pp_text.append(f"> {item}")
+                pp_text.append(f"└ {item}")
         
-        pp_text.append("\n" + "---" + "\n")
+        pp_text.append("\n" + "—" * 15 + "\n")
         
-        # 域名执行结果
         for r in results:
-            pp_text.append(f"#### 🌐 目标域：`{r['name']}`")
-            pp_text.append(f"✅ 更新: **{r['u']}** | ➕ 新增: **{r['a']}** | ➖ 删除: **{r['d']}**\n")
+            pp_text.append(f"🌐 **目标域**: `{r['name']}`")
+            pp_text.append(f"✅ 更新: {r['u']} | ➕ 新增: {r['a']} | ➖ 删除: {r['d']}\n")
 
+        # 使用 \n\n 强制分行，防止 PushPlus 文字挤压
         requests.post('http://www.pushplus.plus/send', 
-                      json={"token": PUSHPLUS_TOKEN, "title": "CFIP 自动化报告", 
+                      json={"token": PUSHPLUS_TOKEN, "title": "CFIP 解析报告", 
                             "content": "\n\n".join(pp_text), "template": "markdown"})
 
 if __name__ == '__main__':
