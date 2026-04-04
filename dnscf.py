@@ -11,7 +11,9 @@ PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
 # --- 硬编码接口列表 ---
 SOURCE_URLS = [
-    "https://cf.001315.xyz/cfxyz",
+    "https://vps789.com/openApi/cfIpApi",
+    "https://cf.001315.xyz/cu",
+    "https://cf.001315.xyz/cmcc",
     "https://cf.001315.xyz/ct",
     "https://ip.164746.xyz/ipTop10.html"
 ]
