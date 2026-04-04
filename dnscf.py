@@ -78,7 +78,7 @@ def main():
     report = [f"📊 *节点审计报告* (总数: {audit['final']})"]
     for src, count in audit['sources'].items():
         report.append(f"• `{src}` → *{count}* IP")
-    report.append(f"\n原始: {audit['raw']} | 重复: {audit['dup']} | **生效: {audit['final']}**\n\n---")
+    report.append(f"\n获取IP: {audit['raw']} | 重复IP: {audit['dup']} | **生效IP: {audit['final']}**\n\n---")
 
     domains = [d.strip() for d in CF_DNS_NAME.replace('，', ',').split(',') if d.strip()]
     for domain in domains:
@@ -107,14 +107,14 @@ def main():
                 else: ops["e"]+=1
             time.sleep(0.3)
 
-        report.append(f"🌐 *域名*: `{domain}`\n- 状态: 更新 `{ops['u']}` | 新增 `{ops['a']}` | 删除 `{ops['d']}`\n")
+        report.append(f"🌐 *目标域名*: `{domain}`\n- 状态: 更新IP解析 `{ops['u']}` | 新增IP解析 `{ops['a']}` | 删除IP解析 `{ops['d']}`\n")
 
     full_content = "\n".join(report)
     
     if PUSHPLUS_TOKEN:
-        requests.post('http://www.pushplus.plus/send', json={"token": PUSHPLUS_TOKEN, "title": "CF 优选报告", "content": full_content, "template": "markdown"})
+        requests.post('http://www.pushplus.plus/send', json={"token": PUSHPLUS_TOKEN, "title": "CF 优选IP解析报告", "content": full_content, "template": "markdown"})
 
-    send_telegram(f"🚀 *CF 自动伸缩报告*\n\n{full_content}")
+    send_telegram(f"🚀 *CF优选IP 自动解析报告*\n\n{full_content}")
 
 if __name__ == '__main__':
     main()
