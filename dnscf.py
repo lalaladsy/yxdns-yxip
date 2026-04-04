@@ -3,6 +3,7 @@
 
 import json, time, os, requests, re
 from urllib.parse import urlparse
+from datetime import datetime, timedelta  # 1. 必须导入这个才能算北京时间
 
 # --- 权限配置 (请在 GitHub Secrets 中配置) ---
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
@@ -103,12 +104,14 @@ def main():
                 if ok: ops["d"]+=1
             time.sleep(0.2)
         
-        # 计算当前该域名最终拥有的解析记录总数
         current_total = oc - ops["d"] + ops["a"]
         results.append({"name": short_name, "u": ops["u"], "a": ops["a"], "d": ops["d"], "total": current_total})
 
+    # 2. 定义 bj_now 变量（UTC+8）
+    bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
+
     # ==========================================
-    # 🚀 TELEGRAM 推送 (运维看板 - 中文版)
+    # 🚀 TELEGRAM 推送
     # ==========================================
     if TG_BOT_TOKEN and TG_CHAT_ID:
         tg_text = [
@@ -127,23 +130,23 @@ def main():
         
         if audit['dup_list']:
             tg_text.append(f"\n⚠️ *重复项过滤* (`{audit['dup_count']}` 组):")
-            for item in audit['dup_list'][:20]: 
+            # 严格按照你要求的原版，保留 [:8] 限制
+            for item in audit['dup_list'][:8]: 
                 tg_text.append(f" └ `{item}`")
             
         tg_text.append(f"\n📡 *解析执行状态*:")
         for r in results:
             tg_text.append(f" ├── 域名: *{r['name']}*")
-            # 在后面增加了“当前”统计
             tg_text.append(f" └── 🟢更新:`{r['u']}`|🔵新增:`{r['a']}`|🔴删除:`{r['d']}`|✨当前:`{r['total']}`")
 
         tg_text.append(f"━━━━━━━━━━━━━━━━━━")
-        tg_text.append(f"⏰ 执行时间: `{time.strftime('%H:%M:%S')}`")
+        tg_text.append(f"⏰ 北京时间: `{bj_now}`") 
 
         requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
                       json={"chat_id": TG_CHAT_ID, "text": "\n".join(tg_text), "parse_mode": "Markdown"})
 
     # ==========================================
-    # 📋 PUSHPLUS 推送 (经典表情版)
+    # 📋 PUSHPLUS 推送
     # ==========================================
     if PUSHPLUS_TOKEN:
         pp_text = [
@@ -156,14 +159,13 @@ def main():
         
         if audit['dup_list']:
             pp_text.append(f"⚠️ **发现 {audit['dup_count']} 个重复项**:")
-            for item in audit['dup_list'][:20]:
+            for item in audit['dup_list'][:10]:
                 pp_text.append(f"└ {item}")
         
         pp_text.append("\n" + "—" * 15 + "\n")
         
         for r in results:
             pp_text.append(f"🌐 **目标域**: `{r['name']}`")
-            # 同样在 PushPlus 增加了当前总计展示
             pp_text.append(f"✅ 更新: {r['u']} | ➕ 新增: {r['a']} | ➖ 删除: {r['d']} | ✨ 当前: {r['total']}\n")
 
         requests.post('http://www.pushplus.plus/send', 
