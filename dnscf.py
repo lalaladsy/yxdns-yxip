@@ -3,11 +3,10 @@
 
 import json, time, os, requests
 
-# --- 环境变量获取 ---
+# API 配置
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_ZONE_ID = os.environ.get("CF_ZONE_ID")
-CF_DNS_NAME = os.environ.get("CF_DNS_NAME")  # 域名1,域名2
-CF_IP_URL = os.environ.get("CF_IP_URL")      # 接口1,接口2
+CF_DNS_NAME = os.environ.get("CF_DNS_NAME")
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 
 HEADERS = {
@@ -15,33 +14,20 @@ HEADERS = {
     'Content-Type': 'application/json'
 }
 
-def get_all_ips():
-    """从多个接口获取 IP 并去重"""
-    if not CF_IP_URL:
+def get_cf_speed_test_ip():
+    """获取优选 IP，返回实际获取到的所有 IP 列表"""
+    try:
+        response = requests.get('https://ip.164746.xyz/ipTop10.html', timeout=10)
+        if response.status_code == 200:
+            # 彻底清洗数据
+            raw = response.text.replace('\n', ',').split(',')
+            ips = [ip.strip() for ip in raw if ip.strip()]
+            return ips
+    except:
         return []
-    
-    urls = [u.strip() for u in CF_IP_URL.split(',') if u.strip()]
-    combined_ips = []
-    
-    for url in urls:
-        try:
-            print(f"正在从接口获取 IP: {url}")
-            response = requests.get(url, timeout=15)
-            if response.status_code == 200:
-                # 兼容换行和逗号，提取所有非空字符串
-                raw_data = response.text.replace('\n', ',').split(',')
-                ips = [ip.strip() for ip in raw_data if ip.strip()]
-                combined_ips.extend(ips)
-        except Exception as e:
-            print(f"接口请求失败 {url}: {e}")
-            
-    # 去重并保持顺序（如果有重复 IP，只保留第一个出现的）
-    seen = set()
-    unique_ips = [x for x in combined_ips if not (x in seen or seen.add(x))]
-    return unique_ips
 
 def get_dns_records(name):
-    """获取 CF 现有的 A 记录"""
+    """获取该域名的所有 A 记录"""
     url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records'
     params = {'type': 'A', 'name': name, 'per_page': 100}
     try:
@@ -51,92 +37,96 @@ def get_dns_records(name):
     except:
         return []
 
-def modify_dns(method, name, ip=None, record_id=None):
-    """封装 增/删/改 操作"""
+def create_dns_record(name, ip):
+    """新增一条 A 记录"""
     url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records'
-    if record_id:
-        url += f'/{record_id}'
-    
     data = {'type': 'A', 'name': name, 'content': ip, 'ttl': 60, 'proxied': False}
-    
     try:
-        if method == "POST":
-            res = requests.post(url, headers=HEADERS, json=data, timeout=10)
-        elif method == "PUT":
-            res = requests.put(url, headers=HEADERS, json=data, timeout=10)
-        elif method == "DELETE":
-            res = requests.delete(url, headers=HEADERS, timeout=10)
+        res = requests.post(url, headers=HEADERS, json=data, timeout=10)
         return res.status_code == 200
     except:
         return False
 
-def push_plus(content):
+def delete_dns_record(record_id):
+    """删除一条记录"""
+    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}'
+    try:
+        res = requests.delete(url, headers=HEADERS, timeout=10)
+        return res.status_code == 200
+    except:
+        return False
+
+def update_dns_record(record_id, name, ip):
+    """更新已有记录"""
+    url = f'https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}'
+    data = {'type': 'A', 'name': name, 'content': ip, 'ttl': 60, 'proxied': False}
+    try:
+        res = requests.put(url, headers=HEADERS, json=data, timeout=10)
+        return res.status_code == 200
+    except:
+        return False
+
+def push_plus(title, content):
     if not PUSHPLUS_TOKEN: return
     url = 'http://www.pushplus.plus/send'
-    data = {
-        "token": PUSHPLUS_TOKEN,
-        "title": "CF DNS 自动伸缩同步报告",
-        "content": content,
-        "template": "markdown"
-    }
-    try:
-        requests.post(url, json=data, timeout=10)
-    except:
-        pass
+    data = {"token": PUSHPLUS_TOKEN, "title": title, "content": content, "template": "markdown"}
+    try: requests.post(url, json=data, timeout=10)
+    except: pass
 
 def main():
-    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME, CF_IP_URL]):
-        print("错误: 环境变量配置不完整")
-        return
+    if not all([CF_API_TOKEN, CF_ZONE_ID, CF_DNS_NAME]): return
 
-    # 1. 汇总所有接口的 IP
-    all_new_ips = get_all_ips()
-    total_new_count = len(all_new_ips)
-    if total_new_count == 0:
-        print("未能从任何接口获取到 IP")
-        return
+    # 1. 获取优选 IP
+    new_ips = get_cf_speed_test_ip()
+    ip_count = len(new_ips)
+    if ip_count == 0: return
 
     target_domains = [d.strip() for d in CF_DNS_NAME.split(',') if d.strip()]
-    full_report = [f"### 🚀 全自动同步完成\n\n**总计获取去重 IP 数**: `{total_new_count}`\n\n---\n"]
+    report = []
 
     for domain in target_domains:
+        # 2. 获取现有记录
         old_records = get_dns_records(domain)
         old_count = len(old_records)
         
-        stats = {"update": 0, "create": 0, "delete": 0, "skip": 0}
+        actions = {"update": 0, "create": 0, "delete": 0}
         
-        # 确定循环次数（以 IP 数和坑位数中较大的为准）
-        max_loop = max(total_new_count, old_count)
+        # 3. 逻辑处理
+        # 情况 A: IP 多于 现有记录 -> 更新现有 + 创建多出的
+        # 情况 B: IP 少于 现有记录 -> 更新匹配的 + 删除多余的
         
-        for i in range(max_loop):
-            # 情况 1：新 IP 还有，老坑位也有 -> 执行更新
-            if i < total_new_count and i < old_count:
-                if old_records[i]['content'] != all_new_ips[i]:
-                    if modify_dns("PUT", domain, all_new_ips[i], old_records[i]['id']):
-                        stats["update"] += 1
+        max_idx = max(ip_count, old_count)
+        
+        for i in range(max_idx):
+            if i < ip_count and i < old_count:
+                # 更新
+                if old_records[i]['content'] != new_ips[i]:
+                    if update_dns_record(old_records[i]['id'], domain, new_ips[i]):
+                        actions["update"] += 1
                 else:
-                    stats["skip"] += 1
-            
-            # 情况 2：新 IP 还有，老坑位用完了 -> 执行新增
-            elif i < total_new_count:
-                if modify_dns("POST", domain, all_new_ips[i]):
-                    stats["create"] += 1
-            
-            # 情况 3：老坑位还有，新 IP 用完了 -> 执行删除多余坑位
+                    pass # 内容一致跳过
+            elif i < ip_count:
+                # 现有坑位不够，创建新坑位
+                if create_dns_record(domain, new_ips[i]):
+                    actions["create"] += 1
             elif i < old_count:
-                if modify_dns("DELETE", domain, record_id=old_records[i]['id']):
-                    stats["delete"] += 1
+                # 优选 IP 变少了，删除多余坑位
+                if delete_dns_record(old_records[i]['id']):
+                    actions["delete"] += 1
             
-            time.sleep(0.3) # 稍微防一下频率限制
+            time.sleep(0.5)
 
-        # 组装通知内容
-        domain_report = f"#### 🌐 {domain}\n"
-        domain_report += f"- 坑位变动: `{old_count}` → `{total_new_count}`\n"
-        domain_report += f"- 详细操作: 更新`{stats['update']}` | 新增`{stats['create']}` | 删除`{stats['delete']}` | 保持`{stats['skip']}`\n\n"
-        full_report.append(domain_report)
+        # 4. 组装单个域名的报告
+        domain_status = f"### 🌐 域名: {domain}\n"
+        domain_status += f"- **获取优选 IP**: `{ip_count}` 个\n"
+        domain_status += f"- **原有解析坑位**: `{old_count}` 个\n"
+        domain_status += f"- **执行操作**: 更新 `{actions['update']}`，新增 `{actions['create']}`，删除 `{actions['delete']}`\n"
+        domain_status += f"- **最终生效数量**: `{ip_count}` 个\n\n"
+        report.append(domain_status)
 
-    # 4. 推送
-    push_plus("".join(full_report))
+    # 5. 发送汇总推送
+    if report:
+        push_plus("CF 优选自动伸缩报告", "".join(report))
 
 if __name__ == '__main__':
     main()
