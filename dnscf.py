@@ -12,54 +12,59 @@ PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN")
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
-# --- 接口配置 (仅从变量读取) ---
+# --- 接口配置 ---
 RAW_URLS = os.environ.get("SOURCE_URLS", "")
 
-# 核心校验
 if not RAW_URLS:
     print("❌ 错误：检测到 SOURCE_URLS 变量为空！")
     exit(1)
 
+# 处理中文逗号并转为列表
 SOURCE_URLS = [u.strip() for u in RAW_URLS.replace('，', ',').split(',') if u.strip()]
 HEADERS = {'Authorization': f'Bearer {CF_API_TOKEN}', 'Content-Type': 'application/json'}
 
 def get_ips_audit():
     source_stats = {}
-    ip_map = {}  # 格式: {"1.1.1.1": ["ip.haogege.xyz", "cf.090227.xyz"]}
+    ip_map = {}  # 格式: {"IP": ["来源名称"]}
     
     for url in SOURCE_URLS:
-        # 提取域名作为标识，防止重名覆盖
-        domain_name = urlparse(url).netloc
-        if not domain_name:
-            domain_name = url.split('/')[-1] if len(url.split('/')[-1]) > 5 else url
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        path = parsed.path.strip('/')
+        
+        # 优化命名逻辑：如果存在特定路径（如 cu/cmcc），则包含路径以区分同域名接口
+        if path and len(path) > 1:
+            name = f"{domain}/{path.split('/')[-1]}"
+        else:
+            name = domain if domain else url.split('/')[-1]
 
         try:
-            res = requests.get(url, timeout=12, headers={'User-Agent': 'Mozilla/5.0'})
+            # 针对 GitHub Raw 等接口增加 User-Agent
+            res = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
             if res.status_code == 200:
-                # 提取并验证合法 IPv4
-                ips = [ip for ip in re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', res.text) 
-                       if all(0 <= int(p) <= 255 for p in ip.split('.'))]
+                # 匹配 IPv4 正则
+                found_ips = re.findall(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', res.text)
+                ips = [ip for ip in found_ips if all(0 <= int(p) <= 255 for p in ip.split('.'))]
                 
-                source_stats[domain_name] = len(ips)
+                source_stats[name] = len(ips)
                 for ip in ips:
                     if ip not in ip_map:
                         ip_map[ip] = []
-                    ip_map[ip].append(domain_name)
+                    ip_map[ip].append(name)
             else:
-                source_stats[domain_name] = f"Err:{res.status_code}"
-        except:
-            source_stats[domain_name] = "Timeout"
+                source_stats[name] = f"Err:{res.status_code}"
+        except Exception as e:
+            source_stats[name] = "Timeout/Error"
 
-    # 唯一 IP 列表
     unique_ips = list(ip_map.keys())
     
-    # 分析重复详情
+    # 分析重复项详情
     dup_details = []
     total_raw_count = 0
     for ip, sources in ip_map.items():
         total_raw_count += len(sources)
         if len(sources) > 1:
-            # 去重来源名称并格式化：IP (来源A, 来源B)
+            # 去重并排序来源
             src_list = ", ".join(sorted(set(sources)))
             dup_details.append(f"`{ip}` ({src_list})")
 
@@ -102,17 +107,17 @@ def main():
         print("⚠️ 未能抓取到任何有效 IP")
         return
 
-    # --- 构造审计报告 ---
-    report = [f"📊 *IP审计报告* (唯一总数: {audit['final']})"]
+    # --- 构造报告 ---
+    report = [f"📊 *IP节点审计报告* (唯一总数: {audit['final']})"]
     for src, count in audit['sources'].items():
         report.append(f"• `{src}` → *{count}* IP")
     
-    report.append(f"\n原始合计: {audit['raw']} | **生效: {audit['final']}**")
+    report.append(f"\n原始累计: {audit['raw']} | **生效: {audit['final']}**")
     
     # 插入重复详情
     if audit['dup_list']:
         report.append(f"\n⚠️ *发现 {audit['dup_count']} 个重复项*:")
-        # 仅展示前 15 个重复，防止消息过长导致发送失败
+        # 限制显示前 15 条，避免 TG 消息过长触发限制
         for item in audit['dup_list'][:15]:
             report.append(f"└ {item}")
         if len(audit['dup_list']) > 15:
@@ -120,7 +125,7 @@ def main():
     
     report.append("\n" + "—" * 20)
 
-    # --- 域名同步逻辑 ---
+    # --- 域名更新 ---
     domains = [d.strip() for d in CF_DNS_NAME.replace('，', ',').split(',') if d.strip()]
     for domain in domains:
         success, msg, res = cf_api("GET", f"dns_records?type=A&name={domain}&per_page=100")
@@ -132,7 +137,6 @@ def main():
         oc, nc = len(old_recs), len(ips)
         ops = {"u": 0, "a": 0, "d": 0, "e": 0}
 
-        # 1:1 自动伸缩同步
         for i in range(max(nc, oc)):
             if i < nc and i < oc:
                 if old_recs[i]['content'] != ips[i]:
@@ -153,11 +157,10 @@ def main():
 
     full_content = "\n".join(report)
     
-    # 推送
     if PUSHPLUS_TOKEN:
-        requests.post('http://www.pushplus.plus/send', json={"token": PUSHPLUS_TOKEN, "title": "CF IP解析报告", "content": full_content, "template": "markdown"})
+        requests.post('http://www.pushplus.plus/send', json={"token": PUSHPLUS_TOKEN, "title": "CFIP 解析报告", "content": full_content, "template": "markdown"})
 
-    send_telegram(f"🚀 *CF 自动解析同步完成*\n\n{full_content}")
+    send_telegram(f"🚀 *CF 自动DNS解析完成*\n\n{full_content}")
 
 if __name__ == '__main__':
     main()
