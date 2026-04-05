@@ -3,9 +3,9 @@
 
 import json, time, os, requests, re
 from urllib.parse import urlparse
-from datetime import datetime, timedelta  # 1. 必须导入这个才能算北京时间
+from datetime import datetime, timedelta
 
-# --- 权限配置 (请在 GitHub Secrets 中配置) ---
+# --- 权限配置 ---
 CF_API_TOKEN = os.environ.get("CF_API_TOKEN")
 CF_ZONE_ID = os.environ.get("CF_ZONE_ID")
 CF_DNS_NAME = os.environ.get("CF_DNS_NAME")
@@ -15,7 +15,6 @@ TG_CHAT_ID = os.environ.get("TG_CHAT_ID")
 
 # --- 接口配置 ---
 RAW_URLS = os.environ.get("SOURCE_URLS", "")
-
 if not RAW_URLS:
     print("❌ 错误：SOURCE_URLS 变量未设置！")
     exit(1)
@@ -107,13 +106,15 @@ def main():
         current_total = oc - ops["d"] + ops["a"]
         results.append({"name": short_name, "u": ops["u"], "a": ops["a"], "d": ops["d"], "total": current_total})
 
-    # 2. 定义 bj_now 变量（UTC+8）
     bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
 
     # ==========================================
-    # 🚀 TELEGRAM 推送
+    # 🚀 TELEGRAM 推送 (一劳永逸：原地更新逻辑)
     # ==========================================
     if TG_BOT_TOKEN and TG_CHAT_ID:
+        base_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}"
+        
+        # 1. 构建消息内容
         tg_text = [
             f"🚀 *Cloudflare 解析同步终端*",
             f"━━━━━━━━━━━━━━━━━━",
@@ -130,8 +131,7 @@ def main():
         
         if audit['dup_list']:
             tg_text.append(f"\n⚠️ *重复项过滤* (`{audit['dup_count']}` 组):")
-            # 严格按照你要求的原版，保留 [:8] 限制
-            for item in audit['dup_list'][:20]: 
+            for item in audit['dup_list'][:8]: 
                 tg_text.append(f" └ `{item}`")
             
         tg_text.append(f"\n📡 *解析执行状态*:")
@@ -141,29 +141,52 @@ def main():
 
         tg_text.append(f"━━━━━━━━━━━━━━━━━━")
         tg_text.append(f"⏰ 北京时间: `{bj_now}`") 
+        
+        full_message = "\n".join(tg_text)
 
-        requests.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", 
-                      json={"chat_id": TG_CHAT_ID, "text": "\n".join(tg_text), "parse_mode": "Markdown"})
+        # 2. 尝试寻找旧的“看板”记录 (通过置顶消息)
+        target_msg_id = None
+        try:
+            chat_info = requests.get(f"{base_url}/getChat", params={"chat_id": TG_CHAT_ID}).json()
+            if chat_info.get("ok"):
+                target_msg_id = chat_info["result"].get("pinned_message", {}).get("message_id")
+        except: pass
+
+        # 3. 编辑旧消息，如果失败（比如消息被手动删了）则发新的并置顶
+        success = False
+        if target_msg_id:
+            edit_res = requests.post(f"{base_url}/editMessageText", json={
+                "chat_id": TG_CHAT_ID,
+                "message_id": target_msg_id,
+                "text": full_message,
+                "parse_mode": "Markdown"
+            }).json()
+            if edit_res.get("ok"):
+                success = True
+
+        if not success:
+            # 发送全新消息
+            new_res = requests.post(f"{base_url}/sendMessage", 
+                                    json={"chat_id": TG_CHAT_ID, "text": full_message, "parse_mode": "Markdown"}).json()
+            if new_res.get("ok"):
+                new_id = new_res["result"]["message_id"]
+                # 只有发新消息时才置顶一次，作为永久展板
+                requests.post(f"{base_url}/pinChatMessage", json={
+                    "chat_id": TG_CHAT_ID, "message_id": new_id, "disable_notification": True
+                })
 
     # ==========================================
-    # 📋 PUSHPLUS 推送
+    # 📋 PUSHPLUS 推送 (保持原样)
     # ==========================================
     if PUSHPLUS_TOKEN:
-        pp_text = [
-            f"📊 **节点审计报告** (可用总数: {audit['final']})\n",
-        ]
+        pp_text = [f"📊 **节点审计报告** (可用总数: {audit['final']})\n"]
         for src, count in audit['sources'].items():
             pp_text.append(f"• `{src}` → **{count}** IP")
-        
         pp_text.append(f"\n📥 抓取 IP: {audit['raw']} | ✅ **可用 IP: {audit['final']}**\n")
-        
         if audit['dup_list']:
             pp_text.append(f"⚠️ **发现 {audit['dup_count']} 个重复项**:")
-            for item in audit['dup_list'][:20]:
-                pp_text.append(f"└ {item}")
-        
+            for item in audit['dup_list'][:10]: pp_text.append(f"└ {item}")
         pp_text.append("\n" + "—" * 15 + "\n")
-        
         for r in results:
             pp_text.append(f"🌐 **目标域**: `{r['name']}`")
             pp_text.append(f"✅ 更新: {r['u']} | ➕ 新增: {r['a']} | ➖ 删除: {r['d']} | ✨ 当前: {r['total']}\n")
