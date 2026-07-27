@@ -109,12 +109,12 @@ def main():
     bj_now = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
 
     # ==========================================
-    # 🚀 TELEGRAM 推送 (一劳永逸：原地更新逻辑)
+    # 🚀 TELEGRAM 推送【修复版】
     # ==========================================
     if TG_BOT_TOKEN and TG_CHAT_ID:
         base_url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}"
         
-        # 1. 构建消息内容
+        # 1. 组装消息内容
         tg_text = [
             f"🚀 *Cloudflare 解析同步终端*",
             f"━━━━━━━━━━━━━━━━━━",
@@ -144,37 +144,30 @@ def main():
         
         full_message = "\n".join(tg_text)
 
-        # 2. 尝试寻找旧的“看板”记录 (通过置顶消息)
-        target_msg_id = None
+        # 先取消全部置顶，避免多条置顶堆积
         try:
-            chat_info = requests.get(f"{base_url}/getChat", params={"chat_id": TG_CHAT_ID}).json()
-            if chat_info.get("ok"):
-                target_msg_id = chat_info["result"].get("pinned_message", {}).get("message_id")
-        except: pass
+            requests.post(f"{base_url}/unpinAllChatMessages", json={"chat_id": TG_CHAT_ID}, timeout=8)
+        except Exception as e:
+            print("取消旧置顶异常:", str(e))
 
-        # 3. 编辑旧消息，如果失败（比如消息被手动删了）则发新的并置顶
-        success = False
-        if target_msg_id:
-            edit_res = requests.post(f"{base_url}/editMessageText", json={
-                "chat_id": TG_CHAT_ID,
-                "message_id": target_msg_id,
-                "text": full_message,
-                "parse_mode": "Markdown"
-            }).json()
-            if edit_res.get("ok"):
-                success = True
+        # 发送新消息（正常推送提醒，不静默）
+        send_payload = {
+            "chat_id": TG_CHAT_ID,
+            "text": full_message,
+            "parse_mode": "Markdown",
+            "disable_notification": False  # 打开推送提醒，手机正常弹窗
+        }
+        send_res = requests.post(f"{base_url}/sendMessage", json=send_payload, timeout=10).json()
+        print("TG发送结果：", send_res)  # 打印返回排查问题
 
-        if not success:
-            # 发送全新消息
-            new_res = requests.post(f"{base_url}/sendMessage", 
-                                    json={"chat_id": TG_CHAT_ID, "text": full_message, "parse_mode": "Markdown"}).json()
-            if new_res.get("ok"):
-                new_id = new_res["result"]["message_id"]
-                # 只有发新消息时才置顶一次，作为永久展板
-                requests.post(f"{base_url}/pinChatMessage", json={
-                    "chat_id": TG_CHAT_ID, "message_id": new_id, "disable_notification": True
-                })
-
+        if send_res.get("ok"):
+            new_msg_id = send_res["result"]["message_id"]
+            # 置顶这条新消息，置顶动作静默即可
+            requests.post(f"{base_url}/pinChatMessage", json={
+                "chat_id": TG_CHAT_ID, 
+                "message_id": new_msg_id, 
+                "disable_notification": True
+            }, timeout=8)
     # ==========================================
     # 📋 PUSHPLUS 推送 (保持原样)
     # ==========================================
